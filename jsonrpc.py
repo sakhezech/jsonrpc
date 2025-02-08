@@ -83,6 +83,22 @@ def _validate[T: _TD](value: Any, schema: type[T]) -> TypeGuard[T]:
     return True
 
 
+def make_request(
+    method: str,
+    params: list | dict | None = None,
+    id: int | str | None = _MISSING,
+) -> Request:
+    obj: Request = {
+        'jsonrpc': '2.0',
+        'method': method,
+    }
+    if id is not _MISSING:
+        obj['id'] = id
+    if params is not None:
+        obj['params'] = params
+    return obj
+
+
 def make_error_response(
     code: int,
     message: str,
