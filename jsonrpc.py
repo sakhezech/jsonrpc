@@ -6,6 +6,7 @@ from typing import (
     Callable,
     Literal,
     NotRequired,
+    Sequence,
     TypedDict,
     TypeGuard,
     get_args,
@@ -24,7 +25,7 @@ class Request(TypedDict):
     jsonrpc: Literal['2.0']
     id: NotRequired[int | str | None]
     method: str
-    params: NotRequired[list | dict]
+    params: NotRequired[list | tuple | dict]
 
 
 class _InnerError(TypedDict):
@@ -85,7 +86,7 @@ def _validate[T: _TD](value: Any, schema: type[T]) -> TypeGuard[T]:
 
 def make_request(
     method: str,
-    params: list | dict | None = None,
+    params: list | tuple | dict | None = None,
     *,
     id: int | str | None = _MISSING,
 ) -> Request:
@@ -154,7 +155,7 @@ def handle_request(
     try:
         if params is None:
             res = func()
-        elif isinstance(params, list):
+        elif isinstance(params, Sequence):
             res = func(*params)
         else:  # elif isinstance(params, dict):
             res = func(**params)
