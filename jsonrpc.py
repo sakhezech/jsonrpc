@@ -1,3 +1,7 @@
+"""
+JSON-RPC 2.0 implementation.
+"""
+
 import inspect
 import json
 from types import UnionType
@@ -90,6 +94,19 @@ def make_request(
     *,
     id: int | str | None = _MISSING,
 ) -> Request:
+    """
+    Constructs a valid JSON-RPC request.
+
+    Leave `id` empty for a notification request.
+
+    Args:
+        method: Name of the method to be invoked.
+        params: Parameter values for the method.
+        id: Request id.
+
+    Returns:
+        JSON-RPC request.
+    """
     obj: Request = {
         'jsonrpc': '2.0',
         'method': method,
@@ -108,6 +125,18 @@ def make_error_response(
     *,
     id: int | str | None,
 ) -> Error | None:
+    """
+    Constructs a valid JSON-RPC failed response.
+
+    Args:
+        code: Error code.
+        message: Error description.
+        data: Additional error info.
+        id: Request id.
+
+    Returns:
+        JSON-RPC response or None if the request was a notification.
+    """
     if id is _MISSING:
         return
     obj: Error = {
@@ -128,6 +157,16 @@ def make_success_response(
     *,
     id: int | str | None,
 ) -> Result | None:
+    """
+    Constructs a valid JSON-RPC successful response.
+
+    Args:
+        result: Result value.
+        id: Request id.
+
+    Returns:
+        JSON-RPC response or None if the request was a notification.
+    """
     if id is _MISSING:
         return
     obj: Result = {
@@ -141,6 +180,16 @@ def make_success_response(
 def handle_request(
     request: Request, method_lookup: dict[str, Callable]
 ) -> Response | None:
+    """
+    Handles a JSON-RPC request.
+
+    Args:
+        request: JSON-RPC request.
+        method_lookup: Lookup dictionary for methods.
+
+    Returns:
+        JSON-RPC response or None if the request was a notification.
+    """
     if not _validate(request, Request):
         return make_error_response(-32600, 'Invalid Request', id=None)
 
@@ -175,6 +224,16 @@ def handle_request(
 def handle_batch_request(
     requests: list[Request], method_lookup: dict[str, Callable]
 ) -> list[Response] | None:
+    """
+    Handles a batch JSON-RPC request.
+
+    Args:
+        request: List of JSON-RPC requests.
+        method_lookup: Lookup dictionary for methods.
+
+    Returns:
+        JSON-RPC responses or None if all the requests are notifications.
+    """
     responses = [
         handle_request(request, method_lookup) for request in requests
     ]
@@ -185,6 +244,16 @@ def handle_batch_request(
 def process_request(
     bytes_: bytes, method_lookup: dict[str, Callable]
 ) -> Response | list[Response] | None:
+    """
+    Parses the request from bytes and handles it.
+
+    Args:
+        bytes_: Request bytes.
+        method_lookup: Lookup dictionary for methods.
+
+    Returns:
+        JSON-RPC response(s) or None if all the requests are notifications.
+    """
     try:
         request = json.loads(bytes_)
     except json.JSONDecodeError:
@@ -198,4 +267,5 @@ def process_request(
 
 
 def serialize(value: Any) -> bytes:
+    """Serializes a value."""
     return json.dumps(value).encode()
