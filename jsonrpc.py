@@ -86,6 +86,7 @@ def _validate[T: _TD](value: Any, schema: type[T]) -> TypeGuard[T]:
 def make_request(
     method: str,
     params: list | dict | None = None,
+    *,
     id: int | str | None = _MISSING,
 ) -> Request:
     obj: Request = {
@@ -102,8 +103,9 @@ def make_request(
 def make_error_response(
     code: int,
     message: str,
-    id: int | str | None,
     data: Any | None = None,
+    *,
+    id: int | str | None,
 ) -> Error | None:
     if id is _MISSING:
         return
@@ -122,6 +124,7 @@ def make_error_response(
 
 def make_success_response(
     result: Any,
+    *,
     id: int | str | None,
 ) -> Result | None:
     if id is _MISSING:
