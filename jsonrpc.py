@@ -1,262 +1,333 @@
-"""
-JSON-RPC 2.0 implementation.
-"""
-
-import inspect
+import asyncio
 import json
-from types import UnionType
+from types import NoneType, UnionType
 from typing import (
     Any,
+    Awaitable,
     Callable,
-    Literal,
-    NotRequired,
+    Self,
     Sequence,
-    TypedDict,
-    TypeGuard,
-    get_args,
-    get_origin,
-    is_typeddict,
     overload,
 )
 
+
+class JSONRPCError(Exception): ...
+
+
+class ParseError(JSONRPCError): ...
+
+
+class InvalidRequestError(JSONRPCError): ...
+
+
+class MethodNotFoundError(JSONRPCError): ...
+
+
+class InvalidParamsError(JSONRPCError): ...
+
+
+class InternalError(JSONRPCError): ...
+
+
+class ServerError(JSONRPCError): ...
+
+
 _MISSING = '=-=MISSING=-='
+_PARSE_ERROR = '=-=PARSE_ERROR=-='
+_INVALID_REQUEST = '=-=INVALID_REQUEST=-='
+_err_types: dict[int, type[JSONRPCError]] = {
+    -32700: ParseError,
+    -32600: InvalidRequestError,
+    -32601: MethodNotFoundError,
+    -32602: InvalidParamsError,
+    -32603: InternalError,
+    -32000: ServerError,
+}
+_request_schema = {
+    'jsonrpc': '2.0',
+    'method': str,
+    'id?': int | str | NoneType,
+    'params?': list | tuple | dict,
+}
+_response_schema = {
+    'jsonrpc': '2.0',
+    'id': int | str | NoneType,
+    'result?': Any,
+    'error?': {'code': int, 'message': str, 'data?': Any},
+}
 
 
-class _TD(TypedDict):
-    pass
-
-
-class Request(TypedDict):
-    jsonrpc: Literal['2.0']
-    id: NotRequired[int | str | None]
-    method: str
-    params: NotRequired[list | tuple | dict]
-
-
-class _InnerError(TypedDict):
-    code: int
-    message: str
-    data: NotRequired[Any]
-
-
-class Result(TypedDict):
-    jsonrpc: Literal['2.0']
-    id: int | str | None
-    result: Any
-
-
-class Error(TypedDict):
-    jsonrpc: Literal['2.0']
-    id: int | str | None
-    error: _InnerError
-
-
-type Response = Result | Error
-
-
-def _validate[T: _TD](value: Any, schema: type[T]) -> TypeGuard[T]:
-    if not isinstance(value, dict):
+def _validate_schema(obj: Any, schema: dict[str, Any]) -> bool:
+    if not isinstance(obj, dict):
         return False
-    schema_dict = inspect.get_annotations(schema)
-
-    for key in schema_dict.keys():
-        type_ = schema_dict[key]
-        origin = get_origin(type_)
-        args = get_args(type_)
-
-        if origin is not NotRequired and key not in value:
-            return False
-        if origin is NotRequired and key not in value:
+    all_keys = [key.removesuffix('?') for key in schema]
+    required_keys = [key for key in schema if not key.endswith('?')]
+    if not (
+        all(key in obj for key in required_keys)
+        and all(key in all_keys for key in obj)
+    ):
+        return False
+    for key, type_ in schema.items():
+        if type_ is Any:
             continue
-        if type_ is Any or Any in args:
-            continue
-        if origin is None:
-            args = (type_,)
-
-        if origin is Literal:
-            if value[key] not in args:
+        if key.endswith('?'):
+            key = key.removesuffix('?')
+            if key not in obj:
+                continue
+        value = obj[key]
+        if isinstance(type_, type | UnionType):
+            if not isinstance(value, type_):
                 return False
-        elif origin in (None, NotRequired, UnionType):
-            if not any(
-                isinstance(value[key], schema_or_type)
-                if not is_typeddict(schema_or_type)
-                else _validate(value[key], schema_or_type)
-                for schema_or_type in args
-            ):
+        elif isinstance(type_, dict):
+            if not _validate_schema(value, type_):
                 return False
         else:
-            raise ValueError(f"can't handle type: {type_}")
+            if value != type_:
+                return False
     return True
 
 
-def make_request(
-    method: str,
-    params: list | tuple | dict | None = None,
-    *,
-    id: int | str | None = _MISSING,
-) -> Request:
-    """
-    Constructs a valid JSON-RPC request.
+class Response:
+    @overload
+    def __init__(self, *, result: Any, id: int | str | None): ...
+    @overload
+    def __init__(
+        self,
+        *,
+        code: int,
+        message: str,
+        data: Any | None = None,
+        id: int | str | None,
+    ): ...
+    def __init__(
+        self,
+        *,
+        result: Any = _MISSING,
+        code: int | None = None,
+        message: str | None = None,
+        data: Any | None = None,
+        id: int | str | None,
+    ) -> None:
+        if not ((result is _MISSING) ^ (code is None)):
+            raise InternalError(
+                f'both result and code are set or unset: '
+                f'result={result} code={code}'
+            )
+        self._result = result
+        self.code = code
+        self.message = message
+        self.data = data
+        self.id = id
 
-    Leave `id` empty for a notification request.
+    def result(self) -> Any:
+        self.raise_if_error()
+        return self._result
 
-    Args:
-        method: Name of the method to be invoked.
-        params: Parameter values for the method.
-        id: Request id.
+    def is_error(self) -> bool:
+        return self.code is not None
 
-    Returns:
-        JSON-RPC request.
-    """
-    obj: Request = {
-        'jsonrpc': '2.0',
-        'method': method,
-    }
-    if id is not _MISSING:
-        obj['id'] = id
-    if params is not None:
-        obj['params'] = params
-    return obj
+    def raise_if_error(self) -> None:
+        if self.code is not None:
+            raise _err_types[self.code](self.data or self.message)
 
+    @classmethod
+    def deserialize(cls, bytes_: bytes) -> Self | list[Self]:
+        response_s = json.loads(bytes_)
+        if isinstance(response_s, list):
+            return [cls.from_dict(response) for response in response_s]
+        return cls.from_dict(response_s)
 
-def make_error_response(
-    code: int,
-    message: str,
-    data: Any | None = None,
-    *,
-    id: int | str | None,
-) -> Error | None:
-    """
-    Constructs a valid JSON-RPC failed response.
+    @classmethod
+    def from_dict(cls, dict_: dict) -> Self:
+        if _validate_schema(dict_, _response_schema):
+            dict_ = dict_.copy()
+            dict_.pop('jsonrpc')
+            if 'error' in dict_:
+                dict_ |= dict_.pop('error')
+            return cls(**dict_)
+        raise InternalError(f'this is not a valid response: {dict_}')
 
-    Args:
-        code: Error code.
-        message: Error description.
-        data: Additional error info.
-        id: Request id.
-
-    Returns:
-        JSON-RPC response or None if the request was a notification.
-    """
-    if id is _MISSING:
-        return
-    obj: Error = {
-        'jsonrpc': '2.0',
-        'id': id,
-        'error': {
-            'code': code,
-            'message': message,
-        },
-    }
-    if data is not None:
-        obj['error']['data'] = data
-    return obj
+    def make_dict(self) -> dict:
+        if not self.is_error():
+            res = {
+                'jsonrpc': '2.0',
+                'id': self.id,
+                'result': self.result(),
+            }
+            return res
+        else:
+            err = {
+                'jsonrpc': '2.0',
+                'id': self.id,
+                'error': {
+                    'code': self.code,
+                    'message': self.message,
+                },
+            }
+            if self.data is not None:
+                err['error']['data'] = self.data
+            return err
 
 
-def make_success_response(
-    result: Any,
-    *,
-    id: int | str | None,
-) -> Result | None:
-    """
-    Constructs a valid JSON-RPC successful response.
+class Request:
+    def __init__(
+        self,
+        method: str,
+        params: list[Any] | tuple[Any, ...] | dict[str, Any] | None = None,
+        *,
+        id: int | str | None = _MISSING,
+    ) -> None:
+        self.id = id
+        self.params = params
+        self.method = method
 
-    Args:
-        result: Result value.
-        id: Request id.
+    def resolve(self, method_lookup: dict[str, Callable]) -> Response | None:
+        try:
+            self._check_is_errored(method_lookup)
+            func = method_lookup[self.method]
+            if self.params is None:
+                res = func()
+            elif isinstance(self.params, Sequence):
+                res = func(*self.params)
+            else:
+                res = func(**self.params)
+            if self.id is not _MISSING:
+                return Response(result=res, id=self.id)
+        except Exception as err:
+            return self._make_error_response(err)
 
-    Returns:
-        JSON-RPC response or None if the request was a notification.
-    """
-    if id is _MISSING:
-        return
-    obj: Result = {
-        'jsonrpc': '2.0',
-        'id': id,
-        'result': result,
-    }
-    return obj
+    async def resolve_async(
+        self, method_lookup: dict[str, Callable]
+    ) -> Response | None:
+        try:
+            self._check_is_errored(method_lookup)
+            func = method_lookup[self.method]
+            if self.params is None:
+                res = await func()
+            elif isinstance(self.params, Sequence):
+                res = await func(*self.params)
+            else:
+                res = await func(**self.params)
+            if self.id is not _MISSING:
+                return Response(result=res, id=self.id)
+        except Exception as err:
+            return self._make_error_response(err)
+
+    def _check_is_errored(self, method_lookup: dict[str, Callable]) -> None:
+        if self.id is _PARSE_ERROR:
+            raise ParseError
+        elif self.id is _INVALID_REQUEST:
+            raise InvalidRequestError
+        elif self.method not in method_lookup:
+            raise MethodNotFoundError
+
+    def _make_error_response(self, err: Exception) -> Response | None:
+        if isinstance(err, ParseError):
+            return Response(code=-32700, message='Parse error', id=None)
+        elif isinstance(err, InvalidRequestError):
+            return Response(code=-32600, message='Invalid Request', id=None)
+        elif self.id is _MISSING:
+            return
+        elif isinstance(err, MethodNotFoundError):
+            return Response(
+                code=-32601, message='Method not found', id=self.id
+            )
+        elif isinstance(err, TypeError):
+            return Response(code=-32602, message='Invalid params', id=self.id)
+        else:
+            return Response(
+                code=-32000,
+                message='Server error',
+                data=self.get_error_data(err),
+                id=self.id,
+            )
+
+    @classmethod
+    def get_error_data(cls, err: Exception) -> str | None:
+        return f'{type(err).__name__}: {str(err)}'
+
+    @classmethod
+    def deserialize(cls, bytes_: bytes) -> Self | list[Self]:
+        try:
+            request_s = json.loads(bytes_)
+            if isinstance(request_s, list):
+                return [cls.from_dict(request) for request in request_s]
+            else:
+                return cls.from_dict(request_s)
+        except json.JSONDecodeError:
+            return cls(_PARSE_ERROR, (_PARSE_ERROR,), id=_PARSE_ERROR)
+
+    @classmethod
+    def from_dict(cls, dict_: dict) -> Self:
+        if _validate_schema(dict_, _request_schema):
+            dict_ = dict_.copy()
+            dict_.pop('jsonrpc')
+            return cls(**dict_)
+        else:
+            return cls(
+                _INVALID_REQUEST, (_INVALID_REQUEST,), id=_INVALID_REQUEST
+            )
+
+    def make_dict(self) -> dict:
+        obj: dict = {
+            'jsonrpc': '2.0',
+            'method': self.method,
+        }
+        if self.id is not _MISSING:
+            obj['id'] = self.id
+        if self.params is not None:
+            obj['params'] = self.params
+        return obj
 
 
 @overload
-def handle_request(
-    request_s: Request, method_lookup: dict[str, Callable]
+def resolve(
+    request_s: Request, method_lookup: dict[str, Callable[..., Any]]
 ) -> Response | None: ...
 @overload
-def handle_request(
-    request_s: list[Request], method_lookup: dict[str, Callable]
+def resolve(
+    request_s: list[Request], method_lookup: dict[str, Callable[..., Any]]
 ) -> list[Response] | None: ...
-def handle_request(
-    request_s: Request | list[Request], method_lookup: dict[str, Callable]
+def resolve(
+    request_s: Request | list[Request],
+    method_lookup: dict[str, Callable[..., Any]],
 ) -> Response | list[Response] | None:
-    """
-    Handles JSON-RPC requests.
+    if isinstance(request_s, list):
+        results = [request.resolve(method_lookup) for request in request_s]
+        filtered = [result for result in results if result]
+        return filtered if filtered else None
+    return request_s.resolve(method_lookup)
 
-    Args:
-        request_s: JSON-RPC request(s).
-        method_lookup: Lookup dictionary for methods.
 
-    Returns:
-        JSON-RPC response(s) or None if all the requests are notifications.
-    """
-    if isinstance(request_s, Sequence):
-        responses = [
-            handle_request(request, method_lookup) for request in request_s
-        ]
-        responses = [response for response in responses if response]
-        return responses if responses else None
-
-    if not _validate(request_s, Request):
-        return make_error_response(-32600, 'Invalid Request', id=None)
-
-    method = request_s['method']
-    id = request_s.get('id', _MISSING)
-    params = request_s.get('params', None)
-
-    if method not in method_lookup:
-        return make_error_response(-32601, 'Method not found', id=id)
-
-    func = method_lookup[method]
-    try:
-        if params is None:
-            res = func()
-        elif isinstance(params, Sequence):
-            res = func(*params)
-        else:  # elif isinstance(params, dict):
-            res = func(**params)
-    except TypeError:
-        return make_error_response(-32602, 'Invalid params', id=id)
-    except Exception as err:
-        return make_error_response(
-            -32603,
-            'Internal error',
-            data=f'{type(err).__name__}: {str(err)}',
-            id=id,
+@overload
+async def resolve_async(
+    request_s: Request, method_lookup: dict[str, Callable[..., Awaitable[Any]]]
+) -> Response | None: ...
+@overload
+async def resolve_async(
+    request_s: list[Request],
+    method_lookup: dict[str, Callable[..., Awaitable[Any]]],
+) -> list[Response] | None: ...
+async def resolve_async(
+    request_s: Request | list[Request],
+    method_lookup: dict[str, Callable[..., Awaitable[Any]]],
+) -> Response | list[Response] | None:
+    if isinstance(request_s, list):
+        results = asyncio.gather(
+            *[request.resolve_async(method_lookup) for request in request_s]
         )
-
-    return make_success_response(res, id=id)
-
-
-def process_request(
-    bytes_: bytes, method_lookup: dict[str, Callable]
-) -> Response | list[Response] | None:
-    """
-    Parses the request from bytes and handles it.
-
-    Args:
-        bytes_: Request bytes.
-        method_lookup: Lookup dictionary for methods.
-
-    Returns:
-        JSON-RPC response(s) or None if all the requests are notifications.
-    """
-    try:
-        request = json.loads(bytes_)
-        return handle_request(request, method_lookup)
-    except json.JSONDecodeError:
-        return make_error_response(-32700, 'Parse error', id=None)
+        filtered = [result for result in await results if result]
+        return filtered if filtered else None
+    return await request_s.resolve_async(method_lookup)
 
 
-def serialize(value: Any) -> bytes:
-    """Serializes a value."""
-    return json.dumps(value).encode()
+def _jsonify(obj: Any):
+    if hasattr(obj, 'make_dict'):
+        return obj.make_dict()
+    raise TypeError
+
+
+def serialize(
+    value: Request | Sequence[Request] | Response | Sequence[Response],
+) -> bytes:
+    return json.dumps(value, default=_jsonify).encode()
