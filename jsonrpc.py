@@ -35,6 +35,7 @@ class ServerError(JSONRPCError): ...
 _MISSING = '=-=MISSING=-='
 _PARSE_ERROR = '=-=PARSE_ERROR=-='
 _INVALID_REQUEST = '=-=INVALID_REQUEST=-='
+_BATCH = '=-=BATCH=-='
 _err_types: dict[int, type[JSONRPCError]] = {
     -32700: ParseError,
     -32600: InvalidRequestError,
@@ -131,10 +132,13 @@ class Response:
             raise _err_types[self.code](self.data or self.message)
 
     @classmethod
-    def deserialize(cls, bytes_: bytes) -> Self | list[Self]:
+    def deserialize(cls, bytes_: bytes) -> Self:
         response_s = json.loads(bytes_)
         if isinstance(response_s, list):
-            return [cls.from_dict(response) for response in response_s]
+            return cls(
+                result=[cls.from_dict(response) for response in response_s],
+                id=_BATCH,
+            )
         return cls.from_dict(response_s)
 
     @classmethod
@@ -147,14 +151,15 @@ class Response:
             return cls(**dict_)
         raise InternalError(f'this is not a valid response: {dict_}')
 
-    def make_dict(self) -> dict:
+    def make_dict(self) -> Any:
         if not self.is_error():
-            res = {
+            if self.id is _BATCH:
+                return self.result()
+            return {
                 'jsonrpc': '2.0',
                 'id': self.id,
                 'result': self.result(),
             }
-            return res
         else:
             err = {
                 'jsonrpc': '2.0',
@@ -180,8 +185,22 @@ class Request:
         self.id = id
         self.params = params
         self.method = method
+        self._batch = []
+
+    @classmethod
+    def batch(cls, requests: list[Self]) -> Self:
+        request = cls(_BATCH, id=_BATCH)
+        request._batch = requests
+        return request
 
     def resolve(self, method_lookup: dict[str, Callable]) -> Response | None:
+        if self.id is _BATCH:
+            results = [
+                request.resolve(method_lookup) for request in self._batch
+            ]
+            filtered = [result for result in results if result]
+            response = Response(result=filtered, id=_BATCH)
+            return response if filtered else None
         try:
             self._check_is_errored(method_lookup)
             func = method_lookup[self.method]
@@ -197,8 +216,18 @@ class Request:
             return self._make_error_response(err)
 
     async def resolve_async(
-        self, method_lookup: dict[str, Callable]
+        self, method_lookup: dict[str, Callable[..., Awaitable]]
     ) -> Response | None:
+        if self.id is _BATCH:
+            results = asyncio.gather(
+                *[
+                    request.resolve_async(method_lookup)
+                    for request in self._batch
+                ]
+            )
+            filtered = [result for result in await results if result]
+            response = Response(result=filtered, id=_BATCH)
+            return response if filtered else None
         try:
             self._check_is_errored(method_lookup)
             func = method_lookup[self.method]
@@ -258,11 +287,15 @@ class Request:
         }
 
     @classmethod
-    def deserialize(cls, bytes_: bytes) -> Self | list[Self]:
+    def deserialize(cls, bytes_: bytes) -> Self:
         try:
             request_s = json.loads(bytes_)
             if isinstance(request_s, list):
-                return [cls.from_dict(request) for request in request_s]
+                request = cls(_BATCH, id=_BATCH)
+                request._batch = [
+                    cls.from_dict(request) for request in request_s
+                ]
+                return request
             else:
                 return cls.from_dict(request_s)
         except json.JSONDecodeError:
@@ -279,7 +312,9 @@ class Request:
                 _INVALID_REQUEST, (_INVALID_REQUEST,), id=_INVALID_REQUEST
             )
 
-    def make_dict(self) -> dict:
+    def make_dict(self) -> Any:
+        if self.id is _BATCH:
+            return self._batch
         obj: dict = {
             'jsonrpc': '2.0',
             'method': self.method,
@@ -289,47 +324,6 @@ class Request:
         if self.params is not None:
             obj['params'] = self.params
         return obj
-
-
-@overload
-def resolve(
-    request_s: Request, method_lookup: dict[str, Callable[..., Any]]
-) -> Response | None: ...
-@overload
-def resolve(
-    request_s: list[Request], method_lookup: dict[str, Callable[..., Any]]
-) -> list[Response] | None: ...
-def resolve(
-    request_s: Request | list[Request],
-    method_lookup: dict[str, Callable[..., Any]],
-) -> Response | list[Response] | None:
-    if isinstance(request_s, list):
-        results = [request.resolve(method_lookup) for request in request_s]
-        filtered = [result for result in results if result]
-        return filtered if filtered else None
-    return request_s.resolve(method_lookup)
-
-
-@overload
-async def resolve_async(
-    request_s: Request, method_lookup: dict[str, Callable[..., Awaitable[Any]]]
-) -> Response | None: ...
-@overload
-async def resolve_async(
-    request_s: list[Request],
-    method_lookup: dict[str, Callable[..., Awaitable[Any]]],
-) -> list[Response] | None: ...
-async def resolve_async(
-    request_s: Request | list[Request],
-    method_lookup: dict[str, Callable[..., Awaitable[Any]]],
-) -> Response | list[Response] | None:
-    if isinstance(request_s, list):
-        results = asyncio.gather(
-            *[request.resolve_async(method_lookup) for request in request_s]
-        )
-        filtered = [result for result in await results if result]
-        return filtered if filtered else None
-    return await request_s.resolve_async(method_lookup)
 
 
 def _jsonify(obj: Any):
