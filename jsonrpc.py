@@ -89,8 +89,8 @@ def _validate_schema(obj: Any, schema: dict[str, Any]) -> bool:
 
 
 def _jsonify(obj: Any):
-    if hasattr(obj, 'make_dict'):
-        return obj.make_dict()
+    if hasattr(obj, '_jsonable'):
+        return obj._jsonable()
     raise TypeError
 
 
@@ -157,7 +157,7 @@ class Response:
             return cls(**dict_)
         raise InternalError(f'this is not a valid response: {dict_}')
 
-    def make_dict(self) -> Any:
+    def _jsonable(self) -> Any:
         if not self.is_error():
             if self.id is _BATCH:
                 return self.result()
@@ -321,7 +321,7 @@ class Request:
                 _INVALID_REQUEST, (_INVALID_REQUEST,), id=_INVALID_REQUEST
             )
 
-    def make_dict(self) -> Any:
+    def _jsonable(self) -> Any:
         if self.id is _BATCH:
             return self._batch
         obj: dict = {
