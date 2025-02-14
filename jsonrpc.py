@@ -251,8 +251,11 @@ class Request:
             )
 
     @classmethod
-    def get_error_data(cls, err: Exception) -> str | None:
-        return f'{type(err).__name__}: {str(err)}'
+    def get_error_data(cls, err: Exception) -> Any:
+        return {
+            'type': type(err).__name__,
+            'info': str(err.args[0]) if err.args else None,
+        }
 
     @classmethod
     def deserialize(cls, bytes_: bytes) -> Self | list[Self]:
