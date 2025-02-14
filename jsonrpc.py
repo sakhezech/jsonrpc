@@ -232,8 +232,16 @@ class Request:
             return Response(
                 code=-32601, message='Method not found', id=self.id
             )
-        elif isinstance(err, TypeError):
-            return Response(code=-32602, message='Invalid params', id=self.id)
+        elif isinstance(err, TypeError) and (
+            'positional argument' in err.args[0]
+            or 'keyword argument' in err.args[0]
+        ):
+            return Response(
+                code=-32602,
+                message='Invalid params',
+                data=self.get_error_data(err),
+                id=self.id,
+            )
         else:
             return Response(
                 code=-32000,
