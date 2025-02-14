@@ -88,6 +88,12 @@ def _validate_schema(obj: Any, schema: dict[str, Any]) -> bool:
     return True
 
 
+def _jsonify(obj: Any):
+    if hasattr(obj, 'make_dict'):
+        return obj.make_dict()
+    raise TypeError
+
+
 class Response:
     @overload
     def __init__(self, *, result: Any, id: int | str | None): ...
@@ -172,6 +178,9 @@ class Response:
             if self.data is not None:
                 err['error']['data'] = self.data
             return err
+
+    def serialize(self) -> bytes:
+        return json.dumps(self, default=_jsonify).encode()
 
 
 class Request:
@@ -325,14 +334,5 @@ class Request:
             obj['params'] = self.params
         return obj
 
-
-def _jsonify(obj: Any):
-    if hasattr(obj, 'make_dict'):
-        return obj.make_dict()
-    raise TypeError
-
-
-def serialize(
-    value: Request | Sequence[Request] | Response | Sequence[Response],
-) -> bytes:
-    return json.dumps(value, default=_jsonify).encode()
+    def serialize(self) -> bytes:
+        return json.dumps(self, default=_jsonify).encode()
