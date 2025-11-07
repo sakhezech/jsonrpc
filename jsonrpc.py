@@ -88,9 +88,9 @@ def _validate_schema(obj: Any, schema: dict[str, Any]) -> bool:
     return True
 
 
-def _jsonify(obj: Any):
-    if hasattr(obj, '_jsonable'):
-        return obj._jsonable()
+def _dump_if_can(obj: Any) -> Any:
+    if hasattr(obj, 'dump'):
+        return obj.dump()
     raise TypeError
 
 
@@ -142,13 +142,13 @@ class Response:
         response_s = json.loads(bytes_)
         if isinstance(response_s, list):
             return cls(
-                result=[cls.from_dict(response) for response in response_s],
+                result=[cls.load(response) for response in response_s],
                 id=_BATCH,
             )
-        return cls.from_dict(response_s)
+        return cls.load(response_s)
 
     @classmethod
-    def from_dict(cls, dict_: dict) -> Self:
+    def load(cls, dict_: dict) -> Self:
         if _validate_schema(dict_, _response_schema):
             dict_ = dict_.copy()
             dict_.pop('jsonrpc')
@@ -157,7 +157,7 @@ class Response:
             return cls(**dict_)
         raise InternalError(f'this is not a valid response: {dict_}')
 
-    def _jsonable(self) -> Any:
+    def dump(self) -> Any:
         if not self.is_error():
             if self.id is _BATCH:
                 return self.result()
@@ -180,7 +180,7 @@ class Response:
             return err
 
     def serialize(self) -> bytes:
-        return json.dumps(self, default=_jsonify).encode()
+        return json.dumps(self, default=_dump_if_can).encode()
 
 
 class Request:
@@ -211,7 +211,7 @@ class Request:
             response = Response(result=filtered, id=_BATCH)
             return response if filtered else None
         try:
-            self._check_is_errored(method_lookup)
+            self._raise_if_cannot_resolve(method_lookup)
             func = method_lookup[self.method]
             if self.params is None:
                 res = func()
@@ -222,7 +222,7 @@ class Request:
             if self.id is not _MISSING:
                 return Response(result=res, id=self.id)
         except Exception as err:
-            return self._make_error_response(err)
+            return self._make_from_exception(err)
 
     async def resolve_async(
         self, method_lookup: dict[str, Callable[..., Awaitable]]
@@ -238,7 +238,7 @@ class Request:
             response = Response(result=filtered, id=_BATCH)
             return response if filtered else None
         try:
-            self._check_is_errored(method_lookup)
+            self._raise_if_cannot_resolve(method_lookup)
             func = method_lookup[self.method]
             if self.params is None:
                 res = await func()
@@ -249,9 +249,11 @@ class Request:
             if self.id is not _MISSING:
                 return Response(result=res, id=self.id)
         except Exception as err:
-            return self._make_error_response(err)
+            return self._make_from_exception(err)
 
-    def _check_is_errored(self, method_lookup: dict[str, Callable]) -> None:
+    def _raise_if_cannot_resolve(
+        self, method_lookup: dict[str, Callable]
+    ) -> None:
         if self.id is _PARSE_ERROR:
             raise ParseError
         elif self.id is _INVALID_REQUEST:
@@ -259,7 +261,7 @@ class Request:
         elif self.method not in method_lookup:
             raise MethodNotFoundError
 
-    def _make_error_response(self, err: Exception) -> Response | None:
+    def _make_from_exception(self, err: Exception) -> Response | None:
         if isinstance(err, ParseError):
             return Response(code=-32700, message='Parse error', id=None)
         elif isinstance(err, InvalidRequestError):
@@ -301,17 +303,15 @@ class Request:
             request_s = json.loads(bytes_)
             if isinstance(request_s, list):
                 request = cls(_BATCH, id=_BATCH)
-                request._batch = [
-                    cls.from_dict(request) for request in request_s
-                ]
+                request._batch = [cls.load(request) for request in request_s]
                 return request
             else:
-                return cls.from_dict(request_s)
+                return cls.load(request_s)
         except json.JSONDecodeError:
             return cls(_PARSE_ERROR, (_PARSE_ERROR,), id=_PARSE_ERROR)
 
     @classmethod
-    def from_dict(cls, dict_: dict) -> Self:
+    def load(cls, dict_: dict) -> Self:
         if _validate_schema(dict_, _request_schema):
             dict_ = dict_.copy()
             dict_.pop('jsonrpc')
@@ -321,7 +321,7 @@ class Request:
                 _INVALID_REQUEST, (_INVALID_REQUEST,), id=_INVALID_REQUEST
             )
 
-    def _jsonable(self) -> Any:
+    def dump(self) -> Any:
         if self.id is _BATCH:
             return self._batch
         obj: dict = {
@@ -335,4 +335,4 @@ class Request:
         return obj
 
     def serialize(self) -> bytes:
-        return json.dumps(self, default=_jsonify).encode()
+        return json.dumps(self, default=_dump_if_can).encode()
