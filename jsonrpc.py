@@ -94,6 +94,161 @@ def _dump_if_can(obj: Any) -> Any:
     raise TypeError
 
 
+class Request:
+    def __init__(
+        self,
+        method: str,
+        params: list[Any] | tuple[Any, ...] | dict[str, Any] | None = None,
+        *,
+        id: int | str | None = _MISSING,
+    ) -> None:
+        self.id = id
+        self.params = params
+        self.method = method
+        self._batch = []
+
+    @classmethod
+    def batch(cls, requests: list[Self]) -> Self:
+        request = cls(_BATCH, id=_BATCH)
+        request._batch = requests
+        return request
+
+    def resolve(self, method_lookup: dict[str, Callable]) -> 'Response | None':
+        if self.id is _BATCH:
+            results = [
+                request.resolve(method_lookup) for request in self._batch
+            ]
+            filtered = [result for result in results if result]
+            response = Response(result=filtered, id=_BATCH)
+            return response if filtered else None
+        try:
+            self._raise_if_cannot_resolve(method_lookup)
+            func = method_lookup[self.method]
+            if self.params is None:
+                res = func()
+            elif isinstance(self.params, Sequence):
+                res = func(*self.params)
+            else:
+                res = func(**self.params)
+            if self.id is not _MISSING:
+                return Response(result=res, id=self.id)
+        except Exception as err:
+            return self._make_from_exception(err)
+
+    async def resolve_async(
+        self, method_lookup: dict[str, Callable[..., Awaitable]]
+    ) -> 'Response | None':
+        if self.id is _BATCH:
+            results = asyncio.gather(
+                *[
+                    request.resolve_async(method_lookup)
+                    for request in self._batch
+                ]
+            )
+            filtered = [result for result in await results if result]
+            response = Response(result=filtered, id=_BATCH)
+            return response if filtered else None
+        try:
+            self._raise_if_cannot_resolve(method_lookup)
+            func = method_lookup[self.method]
+            if self.params is None:
+                res = await func()
+            elif isinstance(self.params, Sequence):
+                res = await func(*self.params)
+            else:
+                res = await func(**self.params)
+            if self.id is not _MISSING:
+                return Response(result=res, id=self.id)
+        except Exception as err:
+            return self._make_from_exception(err)
+
+    def _raise_if_cannot_resolve(
+        self, method_lookup: dict[str, Callable]
+    ) -> None:
+        if self.id is _PARSE_ERROR:
+            raise ParseError
+        elif self.id is _INVALID_REQUEST:
+            raise InvalidRequestError
+        elif self.method not in method_lookup:
+            raise MethodNotFoundError
+
+    def _make_from_exception(self, err: Exception) -> 'Response | None':
+        if isinstance(err, ParseError):
+            return Response(code=-32700, message='Parse error', id=None)
+        elif isinstance(err, InvalidRequestError):
+            return Response(code=-32600, message='Invalid Request', id=None)
+        elif self.id is _MISSING:
+            return
+        elif isinstance(err, MethodNotFoundError):
+            return Response(
+                code=-32601, message='Method not found', id=self.id
+            )
+        elif isinstance(err, TypeError) and (
+            'positional argument' in err.args[0]
+            or 'keyword argument' in err.args[0]
+        ):
+            return Response(
+                code=-32602,
+                message='Invalid params',
+                data=self.get_error_data(err),
+                id=self.id,
+            )
+        else:
+            return Response(
+                code=-32000,
+                message='Server error',
+                data=self.get_error_data(err),
+                id=self.id,
+            )
+
+    @classmethod
+    def get_error_data(cls, err: Exception) -> Any:
+        return {
+            'type': type(err).__name__,
+            'info': str(err.args[0]) if err.args else None,
+        }
+
+    def dump(self) -> Any:
+        if self.id is _BATCH:
+            return self._batch
+        obj: dict = {
+            'jsonrpc': '2.0',
+            'method': self.method,
+        }
+        if self.id is not _MISSING:
+            obj['id'] = self.id
+        if self.params is not None:
+            obj['params'] = self.params
+        return obj
+
+    @classmethod
+    def load(cls, dict_: dict) -> Self:
+        if _validate_schema(dict_, _request_schema):
+            dict_ = dict_.copy()
+            dict_.pop('jsonrpc')
+            return cls(**dict_)
+        else:
+            return cls(
+                _INVALID_REQUEST, (_INVALID_REQUEST,), id=_INVALID_REQUEST
+            )
+
+    def serialize(self) -> bytes:
+        return json.dumps(self, default=_dump_if_can).encode()
+
+    @classmethod
+    def deserialize(cls, bytes_: bytes) -> Self:
+        try:
+            request_s = json.loads(bytes_)
+            if isinstance(request_s, list):
+                request = cls(_BATCH, id=_BATCH)
+                request._batch = [cls.load(request) for request in request_s]
+                return request
+            else:
+                return cls.load(request_s)
+        except json.JSONDecodeError:
+            return cls(_PARSE_ERROR, (_PARSE_ERROR,), id=_PARSE_ERROR)
+
+
 class Response:
     @overload
     def __init__(self, *, result: Any, id: int | str | None): ...
@@ -181,158 +336,3 @@ class Response:
                 id=_BATCH,
             )
         return cls.load(response_s)
-
-
-class Request:
-    def __init__(
-        self,
-        method: str,
-        params: list[Any] | tuple[Any, ...] | dict[str, Any] | None = None,
-        *,
-        id: int | str | None = _MISSING,
-    ) -> None:
-        self.id = id
-        self.params = params
-        self.method = method
-        self._batch = []
-
-    @classmethod
-    def batch(cls, requests: list[Self]) -> Self:
-        request = cls(_BATCH, id=_BATCH)
-        request._batch = requests
-        return request
-
-    def resolve(self, method_lookup: dict[str, Callable]) -> Response | None:
-        if self.id is _BATCH:
-            results = [
-                request.resolve(method_lookup) for request in self._batch
-            ]
-            filtered = [result for result in results if result]
-            response = Response(result=filtered, id=_BATCH)
-            return response if filtered else None
-        try:
-            self._raise_if_cannot_resolve(method_lookup)
-            func = method_lookup[self.method]
-            if self.params is None:
-                res = func()
-            elif isinstance(self.params, Sequence):
-                res = func(*self.params)
-            else:
-                res = func(**self.params)
-            if self.id is not _MISSING:
-                return Response(result=res, id=self.id)
-        except Exception as err:
-            return self._make_from_exception(err)
-
-    async def resolve_async(
-        self, method_lookup: dict[str, Callable[..., Awaitable]]
-    ) -> Response | None:
-        if self.id is _BATCH:
-            results = asyncio.gather(
-                *[
-                    request.resolve_async(method_lookup)
-                    for request in self._batch
-                ]
-            )
-            filtered = [result for result in await results if result]
-            response = Response(result=filtered, id=_BATCH)
-            return response if filtered else None
-        try:
-            self._raise_if_cannot_resolve(method_lookup)
-            func = method_lookup[self.method]
-            if self.params is None:
-                res = await func()
-            elif isinstance(self.params, Sequence):
-                res = await func(*self.params)
-            else:
-                res = await func(**self.params)
-            if self.id is not _MISSING:
-                return Response(result=res, id=self.id)
-        except Exception as err:
-            return self._make_from_exception(err)
-
-    def _raise_if_cannot_resolve(
-        self, method_lookup: dict[str, Callable]
-    ) -> None:
-        if self.id is _PARSE_ERROR:
-            raise ParseError
-        elif self.id is _INVALID_REQUEST:
-            raise InvalidRequestError
-        elif self.method not in method_lookup:
-            raise MethodNotFoundError
-
-    def _make_from_exception(self, err: Exception) -> Response | None:
-        if isinstance(err, ParseError):
-            return Response(code=-32700, message='Parse error', id=None)
-        elif isinstance(err, InvalidRequestError):
-            return Response(code=-32600, message='Invalid Request', id=None)
-        elif self.id is _MISSING:
-            return
-        elif isinstance(err, MethodNotFoundError):
-            return Response(
-                code=-32601, message='Method not found', id=self.id
-            )
-        elif isinstance(err, TypeError) and (
-            'positional argument' in err.args[0]
-            or 'keyword argument' in err.args[0]
-        ):
-            return Response(
-                code=-32602,
-                message='Invalid params',
-                data=self.get_error_data(err),
-                id=self.id,
-            )
-        else:
-            return Response(
-                code=-32000,
-                message='Server error',
-                data=self.get_error_data(err),
-                id=self.id,
-            )
-
-    @classmethod
-    def get_error_data(cls, err: Exception) -> Any:
-        return {
-            'type': type(err).__name__,
-            'info': str(err.args[0]) if err.args else None,
-        }
-
-    def dump(self) -> Any:
-        if self.id is _BATCH:
-            return self._batch
-        obj: dict = {
-            'jsonrpc': '2.0',
-            'method': self.method,
-        }
-        if self.id is not _MISSING:
-            obj['id'] = self.id
-        if self.params is not None:
-            obj['params'] = self.params
-        return obj
-
-    @classmethod
-    def load(cls, dict_: dict) -> Self:
-        if _validate_schema(dict_, _request_schema):
-            dict_ = dict_.copy()
-            dict_.pop('jsonrpc')
-            return cls(**dict_)
-        else:
-            return cls(
-                _INVALID_REQUEST, (_INVALID_REQUEST,), id=_INVALID_REQUEST
-            )
-
-    def serialize(self) -> bytes:
-        return json.dumps(self, default=_dump_if_can).encode()
-
-    @classmethod
-    def deserialize(cls, bytes_: bytes) -> Self:
-        try:
-            request_s = json.loads(bytes_)
-            if isinstance(request_s, list):
-                request = cls(_BATCH, id=_BATCH)
-                request._batch = [cls.load(request) for request in request_s]
-                return request
-            else:
-                return cls.load(request_s)
-        except json.JSONDecodeError:
-            return cls(_PARSE_ERROR, (_PARSE_ERROR,), id=_PARSE_ERROR)
