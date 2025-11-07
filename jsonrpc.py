@@ -137,26 +137,6 @@ class Response:
         if self.code is not None:
             raise _err_types[self.code](self.data or self.message)
 
-    @classmethod
-    def deserialize(cls, bytes_: bytes) -> Self:
-        response_s = json.loads(bytes_)
-        if isinstance(response_s, list):
-            return cls(
-                result=[cls.load(response) for response in response_s],
-                id=_BATCH,
-            )
-        return cls.load(response_s)
-
-    @classmethod
-    def load(cls, dict_: dict) -> Self:
-        if _validate_schema(dict_, _response_schema):
-            dict_ = dict_.copy()
-            dict_.pop('jsonrpc')
-            if 'error' in dict_:
-                dict_ |= dict_.pop('error')
-            return cls(**dict_)
-        raise InternalError(f'this is not a valid response: {dict_}')
-
     def dump(self) -> Any:
         if not self.is_error():
             if self.id is _BATCH:
@@ -179,8 +159,28 @@ class Response:
                 err['error']['data'] = self.data
             return err
 
+    @classmethod
+    def load(cls, dict_: dict) -> Self:
+        if _validate_schema(dict_, _response_schema):
+            dict_ = dict_.copy()
+            dict_.pop('jsonrpc')
+            if 'error' in dict_:
+                dict_ |= dict_.pop('error')
+            return cls(**dict_)
+        raise InternalError(f'this is not a valid response: {dict_}')
+
     def serialize(self) -> bytes:
         return json.dumps(self, default=_dump_if_can).encode()
+
+    @classmethod
+    def deserialize(cls, bytes_: bytes) -> Self:
+        response_s = json.loads(bytes_)
+        if isinstance(response_s, list):
+            return cls(
+                result=[cls.load(response) for response in response_s],
+                id=_BATCH,
+            )
+        return cls.load(response_s)
 
 
 class Request:
@@ -297,30 +297,6 @@ class Request:
             'info': str(err.args[0]) if err.args else None,
         }
 
-    @classmethod
-    def deserialize(cls, bytes_: bytes) -> Self:
-        try:
-            request_s = json.loads(bytes_)
-            if isinstance(request_s, list):
-                request = cls(_BATCH, id=_BATCH)
-                request._batch = [cls.load(request) for request in request_s]
-                return request
-            else:
-                return cls.load(request_s)
-        except json.JSONDecodeError:
-            return cls(_PARSE_ERROR, (_PARSE_ERROR,), id=_PARSE_ERROR)
-
-    @classmethod
-    def load(cls, dict_: dict) -> Self:
-        if _validate_schema(dict_, _request_schema):
-            dict_ = dict_.copy()
-            dict_.pop('jsonrpc')
-            return cls(**dict_)
-        else:
-            return cls(
-                _INVALID_REQUEST, (_INVALID_REQUEST,), id=_INVALID_REQUEST
-            )
-
     def dump(self) -> Any:
         if self.id is _BATCH:
             return self._batch
@@ -334,5 +310,29 @@ class Request:
             obj['params'] = self.params
         return obj
 
+    @classmethod
+    def load(cls, dict_: dict) -> Self:
+        if _validate_schema(dict_, _request_schema):
+            dict_ = dict_.copy()
+            dict_.pop('jsonrpc')
+            return cls(**dict_)
+        else:
+            return cls(
+                _INVALID_REQUEST, (_INVALID_REQUEST,), id=_INVALID_REQUEST
+            )
+
     def serialize(self) -> bytes:
         return json.dumps(self, default=_dump_if_can).encode()
+
+    @classmethod
+    def deserialize(cls, bytes_: bytes) -> Self:
+        try:
+            request_s = json.loads(bytes_)
+            if isinstance(request_s, list):
+                request = cls(_BATCH, id=_BATCH)
+                request._batch = [cls.load(request) for request in request_s]
+                return request
+            else:
+                return cls.load(request_s)
+        except json.JSONDecodeError:
+            return cls(_PARSE_ERROR, (_PARSE_ERROR,), id=_PARSE_ERROR)
