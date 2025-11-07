@@ -35,7 +35,6 @@ class ServerError(JSONRPCError): ...
 _MISSING = '=-=MISSING=-='
 _PARSE_ERROR = '=-=PARSE_ERROR=-='
 _INVALID_REQUEST = '=-=INVALID_REQUEST=-='
-_BATCH = '=-=BATCH=-='
 _err_types: dict[int, type[JSONRPCError]] = {
     -32700: ParseError,
     -32600: InvalidRequestError,
@@ -95,33 +94,44 @@ def _dump_if_can(obj: Any) -> Any:
 
 
 class Request:
+    @overload
     def __init__(
         self,
         method: str,
         params: list[Any] | tuple[Any, ...] | dict[str, Any] | None = None,
         *,
         id: int | str | None = _MISSING,
+    ) -> None: ...
+    @overload
+    def __init__(
+        self,
+        *,
+        batch: Sequence[Self],
+    ) -> None: ...
+    def __init__(
+        self,
+        method: str | None = None,
+        params: list[Any] | tuple[Any, ...] | dict[str, Any] | None = None,
+        *,
+        id: int | str | None = _MISSING,
+        batch: Sequence[Self] | None = None,
     ) -> None:
+        # TODO: ensure method is set if not batch
         self.id = id
         self.params = params
         self.method = method
-        self._batch = []
-
-    @classmethod
-    def batch(cls, requests: list[Self]) -> Self:
-        request = cls(_BATCH, id=_BATCH)
-        request._batch = requests
-        return request
+        self.batch = batch
 
     def resolve(self, method_lookup: dict[str, Callable]) -> 'Response | None':
-        if self.id is _BATCH:
+        if self.batch is not None:
             results = [
-                request.resolve(method_lookup) for request in self._batch
+                request.resolve(method_lookup) for request in self.batch
             ]
             filtered = [result for result in results if result]
-            response = Response(result=filtered, id=_BATCH)
+            response = Response(result=filtered, id=None, is_batch=True)
             return response if filtered else None
         try:
+            assert self.method
             self._raise_if_cannot_resolve(method_lookup)
             func = method_lookup[self.method]
             if self.params is None:
@@ -138,17 +148,18 @@ class Request:
     async def resolve_async(
         self, method_lookup: dict[str, Callable[..., Awaitable]]
     ) -> 'Response | None':
-        if self.id is _BATCH:
+        if self.batch is not None:
             results = asyncio.gather(
                 *[
                     request.resolve_async(method_lookup)
-                    for request in self._batch
+                    for request in self.batch
                 ]
             )
             filtered = [result for result in await results if result]
-            response = Response(result=filtered, id=_BATCH)
+            response = Response(result=filtered, id=None, is_batch=True)
             return response if filtered else None
         try:
+            assert self.method
             self._raise_if_cannot_resolve(method_lookup)
             func = method_lookup[self.method]
             if self.params is None:
@@ -209,8 +220,8 @@ class Request:
         }
 
     def dump(self) -> Any:
-        if self.id is _BATCH:
-            return self._batch
+        if self.batch is not None:
+            return self.batch
         obj: dict = {
             'jsonrpc': '2.0',
             'method': self.method,
@@ -240,9 +251,7 @@ class Request:
         try:
             request_s = json.loads(bytes_)
             if isinstance(request_s, list):
-                request = cls(_BATCH, id=_BATCH)
-                request._batch = [cls.load(request) for request in request_s]
-                return request
+                return cls(batch=[cls.load(request) for request in request_s])
             else:
                 return cls.load(request_s)
         except json.JSONDecodeError:
@@ -251,7 +260,9 @@ class Request:
 
 class Response:
     @overload
-    def __init__(self, *, result: Any, id: int | str | None): ...
+    def __init__(
+        self, *, result: Any, id: int | str | None, is_batch: bool = False
+    ): ...
     @overload
     def __init__(
         self,
@@ -269,6 +280,7 @@ class Response:
         message: str | None = None,
         data: Any | None = None,
         id: int | str | None,
+        is_batch: bool = False,
     ) -> None:
         if not ((result is _MISSING) ^ (code is None)):
             raise InternalError(
@@ -280,6 +292,7 @@ class Response:
         self.message = message
         self.data = data
         self.id = id
+        self.is_batch = is_batch
 
     def result(self) -> Any:
         self.raise_if_error()
@@ -294,7 +307,7 @@ class Response:
 
     def dump(self) -> Any:
         if not self.is_error():
-            if self.id is _BATCH:
+            if self.is_batch:
                 return self.result()
             return {
                 'jsonrpc': '2.0',
@@ -333,6 +346,7 @@ class Response:
         if isinstance(response_s, list):
             return cls(
                 result=[cls.load(response) for response in response_s],
-                id=_BATCH,
+                is_batch=True,
+                id=None,
             )
         return cls.load(response_s)
