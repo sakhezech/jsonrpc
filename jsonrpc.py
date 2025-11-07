@@ -1,10 +1,12 @@
 import asyncio
+import enum
 import json
 from types import NoneType, UnionType
 from typing import (
     Any,
     Awaitable,
     Callable,
+    Literal,
     Self,
     Sequence,
     overload,
@@ -32,7 +34,10 @@ class InternalError(JSONRPCError): ...
 class ServerError(JSONRPCError): ...
 
 
-_MISSING = '=-=MISSING=-='
+_SentinelEnum = enum.Enum('_SentinelEnum', (('MISSING', object()),))
+_MissingType = Literal[_SentinelEnum.MISSING]
+_MISSING = _SentinelEnum.MISSING
+
 _err_types: dict[int, type[JSONRPCError]] = {
     -32700: ParseError,
     -32600: InvalidRequestError,
@@ -98,7 +103,7 @@ class Request:
         method: str,
         params: list[Any] | tuple[Any, ...] | dict[str, Any] | None = None,
         *,
-        id: int | str | None = _MISSING,
+        id: int | str | None | _MissingType = _MISSING,
     ) -> None: ...
     @overload
     def __init__(
@@ -111,7 +116,7 @@ class Request:
         method: str | None = None,
         params: list[Any] | tuple[Any, ...] | dict[str, Any] | None = None,
         *,
-        id: int | str | None = _MISSING,
+        id: int | str | None | _MissingType = _MISSING,
         batch: Sequence[Self] | None = None,
     ) -> None:
         # TODO: ensure method is set if not batch
