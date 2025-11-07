@@ -20,8 +20,8 @@ to_send = [
     jsonrpc.Request('say_hello', {'world': 'wrong param name'}, id=6),
     jsonrpc.Request('say_hello', ['wrong', 'param', 'count'], id=7),
     jsonrpc.Request('say_hello', ['this is a notification']),
-    jsonrpc.Request.batch(
-        [
+    jsonrpc.Request(
+        batch=[
             jsonrpc.Request('sum_numbers', [0, -1], id=8),
             jsonrpc.Request('crash_on_call', id=9),
             jsonrpc.Request('say_hello', ['world'], id=8),
