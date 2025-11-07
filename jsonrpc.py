@@ -119,7 +119,10 @@ class Request:
         id: int | str | None | _MissingType = _MISSING,
         batch: Sequence[Self] | None = None,
     ) -> None:
-        # TODO: ensure method is set if not batch
+        if not ((method is None) ^ (batch is None)):
+            raise InternalError(
+                f'both method and batch are set or unset: {method=} {batch=}'
+            )
         self.id = id
         self.params = params
         self.method = method
@@ -292,8 +295,7 @@ class Response:
     ) -> None:
         if not ((result is _MISSING) ^ (code is None)):
             raise InternalError(
-                f'both result and code are set or unset: '
-                f'result={result} code={code}'
+                f'both result and code are set or unset: {result=} {code=}'
             )
         self._result = result
         self.code = code
