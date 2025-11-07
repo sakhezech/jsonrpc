@@ -33,8 +33,6 @@ class ServerError(JSONRPCError): ...
 
 
 _MISSING = '=-=MISSING=-='
-_PARSE_ERROR = '=-=PARSE_ERROR=-='
-_INVALID_REQUEST = '=-=INVALID_REQUEST=-='
 _err_types: dict[int, type[JSONRPCError]] = {
     -32700: ParseError,
     -32600: InvalidRequestError,
@@ -122,6 +120,9 @@ class Request:
         self.method = method
         self.batch = batch
 
+        self._is_parse_error = False
+        self._is_invalid_request = False
+
     def resolve(self, method_lookup: dict[str, Callable]) -> 'Response | None':
         if self.batch is not None:
             results = [
@@ -176,9 +177,9 @@ class Request:
     def _raise_if_cannot_resolve(
         self, method_lookup: dict[str, Callable]
     ) -> None:
-        if self.id is _PARSE_ERROR:
+        if self._is_parse_error:
             raise ParseError
-        elif self.id is _INVALID_REQUEST:
+        elif self._is_invalid_request:
             raise InvalidRequestError
         elif self.method not in method_lookup:
             raise MethodNotFoundError
@@ -239,9 +240,9 @@ class Request:
             dict_.pop('jsonrpc')
             return cls(**dict_)
         else:
-            return cls(
-                _INVALID_REQUEST, (_INVALID_REQUEST,), id=_INVALID_REQUEST
-            )
+            request = cls(method='', params=tuple(), id=None)
+            request._is_invalid_request = True
+            return request
 
     def serialize(self) -> bytes:
         return json.dumps(self, default=_dump_if_can).encode()
@@ -255,7 +256,9 @@ class Request:
             else:
                 return cls.load(request_s)
         except json.JSONDecodeError:
-            return cls(_PARSE_ERROR, (_PARSE_ERROR,), id=_PARSE_ERROR)
+            request = cls(method='', params=tuple(), id=None)
+            request._is_parse_error = True
+            return request
 
 
 class Response:
